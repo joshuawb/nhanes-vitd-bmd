@@ -1,0 +1,292 @@
+---
+title: "sampling-weight-2"
+author: "Joshua Buchanan (jbuc646) - ID: 710205651"
+date: "2025-09-27"
+output: html_document
+---
+
+### Reading Datasets into R
+
+```{r}
+library(haven)
+library(survey)
+
+## Reading in NHANES data
+demo <- read_xpt("DEMO_J.xpt")
+dxa <- read_xpt("DXXSPN_J.xpt")
+vitd <- read_xpt("VID_J.xpt")
+```
+
+### Combining datasets
+
+```{r}
+## Merge vitamin D and DXA data columns of interest
+vitd.dxa <- merge(vitd[,c("SEQN", "LBXVIDMS")], 
+                  dxa[,c("SEQN", "DXXOSBMD")],
+                  by="SEQN")
+
+## Select demographics columns of interest
+demo.filt <- demo[,c("SEQN", "WTMEC2YR", "SDMVPSU", "SDMVSTRA",
+                        "RIAGENDR", "RIDAGEYR", "RIDRETH3")]
+
+## Merge demographics, vit D, and DXA data. 
+nhanes <- merge(vitd.dxa, demo.filt, by="SEQN")
+```
+
+
+### other preprocessing
+```{r}
+## Create Vit D deficiency binary variable
+nhanes$DEFICIENT <- ifelse(nhanes$LBXVIDMS < 30, 1, 0)
+
+## Change variables to factors
+nhanes$RIAGENDR <- factor(nhanes$RIAGENDR, levels = c(1,2),
+                          labels = c("Male","Female"))
+nhanes$RIDRETH3 <- factor(nhanes$RIDRETH3, levels = c(1:4, 6, 7),
+                          labels = c("Mexican American", "Other Hispanic",
+                                     "White", "Black", "Asian", "Other"))
+nhanes$DEFICIENT <- factor(nhanes$DEFICIENT, levels = c(0, 1), 
+                              labels = c("N", "Y"))
+
+## Create variable for banded age
+nhanes$AGE_BAND <- cut(nhanes$RIDAGEYR,
+                       breaks = c(seq(50, 75, 5), 80, Inf),
+                        right = FALSE, include.lowest = TRUE)
+
+## renaming variables for ease of use
+names(nhanes) <- c("SEQN", "VITD", "BMD", "WEIGHT", "PSU",
+                   "STRATA", "SEX", "AGE", "ETHNICITY", "DEFICIENT", "AGE_BAND")
+str(nhanes)
+```
+
+### Exploratory data analysis
+
+#### dataset breakdown
+
+```{r}
+table(nhanes$SEX, nhanes$DEFICIENT)
+table(nhanes$ETHNICITY, nhanes$DEFICIENT)
+table(nhanes$AGE_BAND, nhanes$DEFICIENT)
+
+## Tables, Breakdown by Gender and Ethnicity, maybe Age band too
+
+## Obviously show missing data
+
+### SEX ###
+t1 <- table(nhanes$SEX)
+## proportion vit D deficient
+t2 <- round(prop.table(table(nhanes$SEX, nhanes$DEFICIENT),1),3)[,2]
+## proportion of missing DXA data
+t3 <- round(prop.table(table(nhanes$SEX, is.na(nhanes$BMD)),1),3)[,2]
+## mean BMD
+cbind(n=t1, prop.def=t2, prop.miss=t3)
+
+### Mean BMD
+cbind(n=table(nhanes$SEX[!is.na(nhanes$BMD)]), 
+      mean.bmd=round(tapply(nhanes$BMD, nhanes$SEX, mean, na.rm=T),3))
+
+
+### ETHNICITY ###
+t1 <- table(nhanes$ETHNICITY)
+## proportion vit D deficient
+t2 <- round(prop.table(table(nhanes$ETHNICITY, nhanes$DEFICIENT),1),3)[,2]
+## proportion of missing DXA data
+t3 <- round(prop.table(table(nhanes$ETHNICITY, is.na(nhanes$BMD)),1),3)[,2]
+cbind(n=t1, prop.def=t2, prop.miss=t3)
+
+### Mean BMD
+cbind(n=table(nhanes$ETHNICITY[!is.na(nhanes$BMD)]), 
+      mean.bmd=round(tapply(nhanes$BMD, nhanes$ETHNICITY, mean, na.rm=T),3))
+
+### AGE ###
+t1 <- table(nhanes$AGE_BAND)
+## proportion vit D deficient
+t2 <- round(prop.table(table(nhanes$AGE_BAND, nhanes$DEFICIENT),1),3)[,2]
+## proportion of missing DXA data
+t3 <- round(prop.table(table(nhanes$AGE_BAND, is.na(nhanes$BMD)),1),3)[,2]
+cbind(n=t1, prop.def=t2, prop.miss=t3)
+
+### Mean BMD
+cbind(n=table(nhanes$AGE_BAND[!is.na(nhanes$BMD)]), 
+      mean.bmd=round(tapply(nhanes$BMD, nhanes$AGE_BAND, mean, na.rm=T),3))
+```
+
+# Appendix boxplots of BMD by covariates. 
+
+```{r}
+# png("bmd_by_sex_boxplot.png",
+#     width = 6.5, height = 3.5, units = "in",   # physical size
+#     res = 300)           
+# par(mar = c(4,4,1,1))
+boxplot(BMD ~ SEX, data=nhanes, pch=16, xlab="",
+         ylab="Lumbar spine BMD", cex.lab=0.6, cex.axis=0.6)
+# boxplot(BMD ~ AGE_BAND, data=nhanes, pch=16, xlab="",
+#           ylab="Lumbar spine BMD", cex.lab=0.6, cex.axis=0.6)
+# boxplot(BMD ~ ETHNICITY, data=nhanes, pch=16, xlab="",
+#          ylab="Lumbar spine BMD", cex.axis=0.60, cex.lab=0.6)
+```
+
+
+# survey design objects
+
+```{r}
+## Full design
+des_full <- svydesign(
+  id = ~PSU, strata = ~STRATA, weights = ~WEIGHT,
+  nest = TRUE, data = nhanes
+)
+
+## Complete design object
+complete_design <- subset(des_full, !is.na(BMD) & !is.na(VITD)) 
+
+## population margins from the full design
+pop_sex <- as.data.frame(svytable(~SEX, des_full))[, c("SEX","Freq")]
+pop_age <- as.data.frame(svytable(~AGE_BAND, des_full))[, c("AGE_BAND","Freq")]
+pop_race <- as.data.frame(svytable(~ETHNICITY, des_full))[, c("ETHNICITY","Freq")]
+
+## Rake the complete cases design by the population margins
+des_raked <- rake(
+  design = complete_design,
+  sample.margins = list(~SEX, ~AGE_BAND, ~ETHNICITY),
+  population.margins = list(pop_sex, pop_age, pop_race)
+)
+```
+
+
+# Results
+
+# Descriptive statistics
+
+Estimate totals based on amount of vitamin D deficient people in dataset and multiple by U.S. population.
+
+```{r}
+(t <- prop.table(table(nhanes$DEFICIENT))) # 0.0571222
+
+## Multiply by U.S. 50+ population at 2017: roughly 114M from internet.
+t[2] * 114 * 1e6
+```
+
+18.5M is our crude estimate. 
+
+Using the full design matrix, this estimate is of the total Vitamin D deficient 50+ year olds in the U.S based on the full dataset.
+
+```{r}
+## Estimate totals of deficient individuals
+svytotal(~DEFICIENT, des_full, na.rm=T)
+
+## Compute confidence interval
+confint(svytotal(~DEFICIENT, des_full, na.rm=T))
+```
+
+Using the complete design matrix, this estimate is of the total Vitamin D deficient 50+ year olds in the U.S that would be eligible for a DXA scan and not have an invalid reading. This estimate will be biased if the missingness is not at random - which there was evidence of in the exploratory data analysis.
+
+```{r}
+## Totals using complete design
+svytotal(~DEFICIENT, complete_design)
+```
+
+Using the raked design matrix, this estimate is of the total Vitamin D deficient 50+ year olds in the U.S based on only the Vitamin D data of participants that had valid scans and scaled to match the key demographics in the full dataset. It is evident that this estimate is closer to the estimate of the full dataset compared to the complete-cases estimate. It will not be the same as the full-design result because the missing participants are still missing, the remaining ones have just been reweighted. The results show a lower estimated number of Vitamin D deficient 50+ year olds in the U.S population compared to using the full design which aligns with our hypothesis in the EDA section that without accounting for missing data, the total will be over-estimated. 
+
+```{r}
+## Totals using raked design 
+svytotal(~DEFICIENT, des_raked) 
+```
+
+
+
+### Weighted means
+
+```{r}
+## Weight mean using complete-cases
+svymean(~BMD, complete_design)
+
+## Mean BMD in dataset unadjusted.
+mean(nhanes$BMD, na.rm=T)
+```
+
+```{r}
+## Weighted means usign raked design
+svymean(~BMD, des_raked)
+
+## Confidence interval
+confint(svymean(~BMD, des_raked))
+```
+
+
+```{r}
+## Mean in dataset
+mean(nhanes$BMD, na.rm=T)
+```
+
+
+# Weighted mean BMD by vit D Status
+
+```{r}
+## Mean BMD by vitamin D status
+svyby(~BMD, ~DEFICIENT, complete_design, svymean)
+svyby(~BMD, ~DEFICIENT, des_raked, svymean)
+tapply(nhanes$BMD, nhanes$DEFICIENT, mean, na.rm=T)
+
+## Design-based T-test
+svyttest(BMD ~ DEFICIENT, design=complete_design)
+svyttest(BMD ~ DEFICIENT, design=des_raked)
+t.test(nhanes$BMD ~ nhanes$DEFICIENT)
+
+```
+
+### Regression models
+
+```{r}
+### Non survey weighted regression
+model.base <- glm(BMD ~ DEFICIENT,
+                 family = Gamma(link = "log"), data = nhanes)
+summary(model.base) 
+
+
+### Basic model
+model <- svyglm(BMD ~ DEFICIENT,
+                 family = Gamma(link = "log"), design = des_raked)
+summary(model) 
+## becomes very close to significant on its own 
+
+
+## We should use Gamma with log-link as outcome strictly positive - this model adds covariates.
+model1 <- svyglm(BMD ~ DEFICIENT + SEX + AGE + ETHNICITY,
+                family = Gamma(link = "log"), design = des_raked)
+summary(model1)
+
+anova(model, model1)
+
+
+## Add sex:age interaction
+model2 <- svyglm(BMD ~ DEFICIENT + SEX * AGE + ETHNICITY,
+                 family = Gamma(link = "log"), design = des_raked)
+
+summary(model2)
+
+anova(model1, model2)
+
+
+### Checking is the complete-cases design gives us similar results, which it does. 
+model3 <- svyglm(BMD ~ DEFICIENT + SEX * AGE + ETHNICITY,
+                 family = Gamma(link = "log"), design = complete_design)
+summary(model3)
+
+
+
+```
+
+
+
+
+```{r}
+### Svytables by age, ethnicity, etc using different designs.
+svyby(~ I(DEFICIENT == "Y"),
+      ~ AGE_BAND,
+      design = des_full,
+      FUN = svyciprop,
+      method = "logit",
+      vartype = c("se","ci"),
+      na.rm = TRUE)
+```
+
